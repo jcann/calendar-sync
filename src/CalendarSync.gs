@@ -9,7 +9,7 @@
  * Sends a daily summary email to personal Gmail (toggle via LOG_EMAIL flag).
  * Stage 1: NO work emails sent. Logs + Automation calendar only.
  *
- * GitHub: https://github.com/YOUR_USERNAME/calendar-sync
+ * GitHub: https://github.com/jcann/calendar-sync
  * Version: 1.4.0 — daily summary email to personal Gmail
  */
 
