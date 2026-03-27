@@ -5,12 +5,12 @@
  * copies to Automation calendar, marks source events as processed, and logs.
  *
  * Runs once daily at ~5:30 PM, every day including weekends.
- * Only processes events that fall on weekdays during business hours.
- * Sends a daily summary email to personal Gmail (toggle via LOG_EMAIL flag).
+ * Supports 9/80 schedule — detects OFF Fridays via "Off Friday" all-day
+ * event on the Kids calendar. ON Fridays use 7 AM–3 PM hours.
  * Stage 1: NO work emails sent. Logs + Automation calendar only.
  *
  * GitHub: https://github.com/jcann/calendar-sync
- * Version: 1.4.0 — daily summary email to personal Gmail
+ * Version: 1.5.0 — 9/80 schedule support, kids calendar enabled
  */
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ const CONFIG = {
   AUTOMATION_CALENDAR_ID: "3e6bf5b370e1609f0bee08614941ff268aae0ebe087552a48eafb037f539c587@group.calendar.google.com",
 
   // Your personal Gmail address for log summary emails
-  PERSONAL_EMAIL: "YOUR_PERSONAL_GMAIL@gmail.com",
+  PERSONAL_EMAIL: "cannj65@gmail.com",
 
   // How far ahead to look for new events (days)
   LOOKAHEAD_DAYS: 14,
@@ -30,12 +30,18 @@ const CONFIG = {
   // Commute buffer in minutes
   COMMUTE_BUFFER_MINUTES: 15,
 
-  // Business hours — used to decide whether an *event* overlaps work time
+  // Standard business hours (Mon–Thu and ON Fridays)
   BUSINESS_START_HOUR: 7,
-  BUSINESS_END_HOUR:   17,
+  BUSINESS_END_HOUR:   17, // 5 PM Mon–Thu
 
-  // Weekdays only for event filtering (Sun=0, Mon=1 … Sat=6)
+  // ON Friday hours (9/80 schedule — shorter day)
+  FRIDAY_END_HOUR: 15, // 3 PM on ON Fridays
+
+  // Weekdays (Sun=0, Mon=1 … Sat=6)
   WORK_DAYS: [1, 2, 3, 4, 5],
+
+  // OFF Friday detection — title of the all-day event on the Kids calendar
+  OFF_FRIDAY_TITLE: "Off Friday",
 
   // Tag appended to processed source events — short and unobtrusive
   PROCESSED_TAG: "#cannudigit-cal-sync",
@@ -44,13 +50,13 @@ const CONFIG = {
   STAGE: {
     COPY_TO_AUTOMATION: true,  // Stage 1: ON
     LOG_EMAIL:          true,  // Daily summary to personal Gmail — flip false to stop
-    SEND_EMAIL:         false, // Stage 4+: work Outlook email — OFF for now
-    INCLUDE_KIDS:       false, // Stage 3+: OFF for now
+    SEND_EMAIL:         true,  // Stage 4+: work Outlook email — OFF for now
+    INCLUDE_KIDS:       true,  // Stage 3: ON
   },
 
   // Work email config (unused in Stage 1 — filled in for Stage 4)
   EMAIL: {
-    TO:      "YOUR_TEST_EMAIL@gmail.com", // Stage 4: swap to work Outlook address
+    TO:      "cannj65@gmail.com", // Stage 4: swap to work Outlook address
     SUBJECT: "Busy",
     BODY:    "Blocked - personal appointment",
   },
@@ -64,7 +70,7 @@ const CONFIG = {
  */
 function runSync() {
   const now      = new Date();
-  const logLines = []; // collects all log lines for the summary email
+  const logLines = [];
 
   const record = (msg) => {
     log(msg);
@@ -90,14 +96,21 @@ function runSync() {
 
     events.forEach(event => {
       try {
+        // Skip the OFF Friday marker event itself
+        if (isOffFridayMarker(event)) {
+          return;
+        }
+
         if (isAlreadyProcessed(event)) {
           record(`    SKIP: "${event.getTitle()}" — already processed`);
           totalSkipped++;
           return;
         }
 
-        if (!overlapsWorkHours(event)) {
-          record(`    SKIP: "${event.getTitle()}" — not a weekday business-hours event`);
+        const overlapResult = overlapsWorkHours(event);
+
+        if (!overlapResult.overlaps) {
+          record(`    SKIP: "${event.getTitle()}" — ${overlapResult.reason}`);
           totalSkipped++;
           return;
         }
@@ -223,25 +236,79 @@ function isAlreadyProcessed(event) {
   return desc.includes(CONFIG.PROCESSED_TAG);
 }
 
+/**
+ * isOffFridayMarker() — returns true if this event IS the "Off Friday"
+ * all-day marker itself, so we don't try to process or skip-log it.
+ */
+function isOffFridayMarker(event) {
+  return event.isAllDayEvent() &&
+         event.getTitle().trim() === CONFIG.OFF_FRIDAY_TITLE;
+}
+
+/**
+ * isOffFriday() — checks the Kids calendar for an all-day "Off Friday"
+ * event on the given date. Returns true if found.
+ */
+function isOffFriday(date) {
+  const cal = CalendarApp.getCalendarById(CONFIG.KIDS_CALENDAR_ID);
+  if (!cal) return false;
+
+  // Check the full day of the given date
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(date);
+  dayEnd.setHours(23, 59, 59, 999);
+
+  const events = cal.getEvents(dayStart, dayEnd);
+  return events.some(e =>
+    e.isAllDayEvent() &&
+    e.getTitle().trim() === CONFIG.OFF_FRIDAY_TITLE
+  );
+}
+
 // ─── TIME HELPERS ─────────────────────────────────────────────────────────────
 
 /**
- * overlapsWorkHours() — true only if the event falls on a weekday
- * AND overlaps the 7 AM–5 PM business window.
+ * overlapsWorkHours() — returns { overlaps: bool, reason: string }
+ *
+ * Rules:
+ *   - Mon–Thu: 7 AM–5 PM
+ *   - OFF Friday: skip entirely (treated like weekend)
+ *   - ON Friday: 7 AM–3 PM
+ *   - Sat–Sun: skip
  */
 function overlapsWorkHours(event) {
-  const start = event.getStartTime();
-  const end   = event.getEndTime();
+  const start   = event.getStartTime();
+  const end     = event.getEndTime();
+  const dayOfWk = start.getDay(); // 0=Sun, 5=Fri, 6=Sat
 
-  if (!CONFIG.WORK_DAYS.includes(start.getDay())) return false;
+  // Weekend
+  if (!CONFIG.WORK_DAYS.includes(dayOfWk)) {
+    return { overlaps: false, reason: "weekend event" };
+  }
 
+  // Friday handling
+  if (dayOfWk === 5) {
+    if (isOffFriday(start)) {
+      return { overlaps: false, reason: "OFF Friday" };
+    }
+    // ON Friday — shorter day
+    const startHour = start.getHours() + start.getMinutes() / 60;
+    const endHour   = end.getHours()   + end.getMinutes()   / 60;
+    if (startHour >= CONFIG.FRIDAY_END_HOUR || endHour <= CONFIG.BUSINESS_START_HOUR) {
+      return { overlaps: false, reason: "outside ON Friday hours (7 AM–3 PM)" };
+    }
+    return { overlaps: true, reason: "" };
+  }
+
+  // Mon–Thu standard hours
   const startHour = start.getHours() + start.getMinutes() / 60;
   const endHour   = end.getHours()   + end.getMinutes()   / 60;
+  if (startHour >= CONFIG.BUSINESS_END_HOUR || endHour <= CONFIG.BUSINESS_START_HOUR) {
+    return { overlaps: false, reason: "outside business hours" };
+  }
 
-  return (
-    startHour < CONFIG.BUSINESS_END_HOUR &&
-    endHour   > CONFIG.BUSINESS_START_HOUR
-  );
+  return { overlaps: true, reason: "" };
 }
 
 function addMinutes(date, minutes) {
@@ -272,10 +339,10 @@ function log(message) {
  * Flip CONFIG.STAGE.LOG_EMAIL to false to stop receiving these.
  */
 function sendLogEmail(runTime, processed, skipped, errors, logLines) {
-  const dateStr  = Utilities.formatDate(runTime, Session.getScriptTimeZone(), "EEE MM/dd");
-  const status   = errors > 0 ? "⚠️ ERROR" : processed > 0 ? "✅ OK" : "— idle";
-  const subject  = `CalendarSync — ${dateStr} — ${processed} processed, ${skipped} skipped ${status}`;
-  const body     = logLines.join("\n");
+  const dateStr = Utilities.formatDate(runTime, Session.getScriptTimeZone(), "EEE MM/dd");
+  const status  = errors > 0 ? "⚠️ ERROR" : processed > 0 ? "✅ OK" : "— idle";
+  const subject = `CalendarSync — ${dateStr} — ${processed} processed, ${skipped} skipped ${status}`;
+  const body    = logLines.join("\n");
 
   GmailApp.sendEmail(CONFIG.PERSONAL_EMAIL, subject, body);
   log(`Summary email sent to ${CONFIG.PERSONAL_EMAIL}`);
@@ -337,9 +404,10 @@ function deleteTriggers() {
 
 // ─── STAGE ADVANCEMENT CHECKLIST ─────────────────────────────────────────────
 //
-// Stage 1 (NOW):  COPY_TO_AUTOMATION=true, LOG_EMAIL=true, SEND_EMAIL=false, INCLUDE_KIDS=false
-// Stage 2:        Observe a few days — confirm no duplicates in Automation calendar
-// Stage 3:        INCLUDE_KIDS=true — verify kids events copy correctly
+// Stage 1 (NOW):  COPY_TO_AUTOMATION=true, LOG_EMAIL=true,
+//                 SEND_EMAIL=false, INCLUDE_KIDS=true
+// Stage 2:        Observe a few days — confirm no duplicates — done
+// Stage 3:        ✅ INCLUDE_KIDS=true — done
 // Stage 4:        SEND_EMAIL=true, EMAIL.TO=personal Gmail — confirm email format
 // Stage 5:        EMAIL.TO=work Outlook address — production
 // Any time:       LOG_EMAIL=false to stop daily summary emails
