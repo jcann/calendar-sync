@@ -17,7 +17,7 @@
 const CONFIG = {
     // Calendar IDs
     PERSONAL_CALENDAR_ID: "primary",
-    KIDS_CALENDAR_ID:
+    KIDS_CALENDAR_ID: 
         "8763718fbb7b77eabf8128f92dd566f8ba12b4059f1e8668d7f2ef95d26f5ca9@group.calendar.google.com",
     AUTOMATION_CALENDAR_ID:
         "3e6bf5b370e1609f0bee08614941ff268aae0ebe087552a48eafb037f539c587@group.calendar.google.com",
